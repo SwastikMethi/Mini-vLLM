@@ -1,0 +1,372 @@
+openapi: 3.1.0
+info:
+  title: Mini-vLLM local API
+  version: 1.0.0
+  description: Proposed R0 contract. One process owns one engine. Fixture values are
+    illustrative, not measured.
+servers:
+- url: http://127.0.0.1:8000
+paths:
+  /api/runs:
+    get:
+      operationId: listRuns
+      responses:
+        '200':
+          description: Retained runs newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    run_id: &id001
+                      type: string
+                    status:
+                      type: string
+                      enum:
+                      - active
+                      - completed
+                      - failed
+                    started_at:
+                      type: string
+                      format: date-time
+                    trace_complete:
+                      type: boolean
+                  required:
+                  - run_id
+                  - status
+                  - started_at
+                  - trace_complete
+                  additionalProperties: false
+  /api/health:
+    get:
+      operationId: getHealth
+      responses:
+        '200':
+          description: Engine readiness and manifest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                    - loading
+                    - ready
+                    - failed
+                  run_id: &id002
+                    type:
+                    - string
+                    - 'null'
+                  model_id: *id001
+                  model_revision: *id002
+                  device: *id002
+                  manifest:
+                    type: object
+                  error: *id002
+                required:
+                - status
+                - run_id
+                - model_id
+                - model_revision
+                - device
+                - manifest
+                - error
+                additionalProperties: false
+  /api/requests:
+    post:
+      operationId: submitRequest
+      description: Idempotency key is client_request_id scoped to the active run.
+        Same body returns same request ID; changed body returns 409. Engine assigns
+        request.accepted after receiving the command. A model-template token count
+        check enforces the configured request budget.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestSubmission'
+      responses:
+        '202':
+          description: Accepted or identical retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '409':
+          description: Idempotency key reused with changed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid or impossible request budget
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Waiting queue full
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Engine unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/requests/{request_id}/cancel:
+    post:
+      operationId: cancelRequest
+      parameters:
+      - name: request_id
+        in: path
+        required: true
+        schema: *id001
+      responses:
+        '202':
+          description: Cancellation requested; await terminal event
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: *id001
+                  status:
+                    const: cancel_requested
+                required:
+                - request_id
+                - status
+                additionalProperties: false
+        '200':
+          description: Already terminal
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: *id001
+                  status:
+                    type: string
+                    enum:
+                    - completed
+                    - cancelled
+                    - failed
+                required:
+                - request_id
+                - status
+                additionalProperties: false
+        '404':
+          description: Unknown request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/runs/{run_id}/snapshot:
+    get:
+      operationId: getSnapshot
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema: *id001
+      responses:
+        '200':
+          description: Atomic state through high_watermark_seq. Apply then subscribe
+            after that sequence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Snapshot'
+        '404':
+          description: Unknown or evicted run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/runs/{run_id}/events:
+    get:
+      operationId: streamEvents
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema: *id001
+      - name: after_seq
+        in: query
+        schema: &id003
+          type: integer
+          minimum: 0
+      - name: Last-Event-ID
+        in: header
+        schema: *id001
+      description: 'Global run stream. Last-Event-ID takes precedence over after_seq
+        and uses run_id:seq. No cursor starts from zero. id lines use run_id:seq;
+        event is engine_event; data is one EngineEvent JSON object. A heartbeat is
+        a comment. Invalid or stale cursor produces event: reset with data {reason,
+        snapshot_url}; this control record has no engine sequence and the connection
+        closes. A slow subscriber reconnects from the journal.'
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          description: Unknown or evicted run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/runs/{run_id}/export:
+    get:
+      operationId: exportRun
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema: *id001
+      responses:
+        '200':
+          description: Trace export; must label fixture and measurement modes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  manifest:
+                    type: object
+                  initial_state:
+                    type: object
+                  events:
+                    type: array
+                    items:
+                      $ref: ./event_schema.json
+                  final_snapshot:
+                    $ref: '#/components/schemas/Snapshot'
+                required:
+                - manifest
+                - initial_state
+                - events
+                - final_snapshot
+                additionalProperties: false
+        '404':
+          description: Unknown or evicted run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    RequestSubmission:
+      type: object
+      properties:
+        prompt:
+          type: string
+          minLength: 1
+        max_new_tokens:
+          type: integer
+          minimum: 1
+          maximum: 256
+          default: 128
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0
+        seed:
+          type: integer
+          minimum: 0
+          default: 0
+        client_request_id:
+          type: string
+          minLength: 1
+      required:
+      - prompt
+      - client_request_id
+      additionalProperties: false
+    AcceptedResponse:
+      type: object
+      properties:
+        request_id: *id001
+        run_id: *id001
+        status:
+          type: string
+          enum:
+          - accepted
+        events_url: *id001
+      required:
+      - request_id
+      - run_id
+      - status
+      - events_url
+      additionalProperties: false
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: *id001
+            message: *id001
+            retryable:
+              type: boolean
+          required:
+          - code
+          - message
+          - retryable
+          additionalProperties: false
+      required:
+      - error
+      additionalProperties: false
+    Snapshot:
+      type: object
+      properties:
+        schema_version:
+          const: 1
+        run_id: *id001
+        high_watermark_seq: *id003
+        trace_complete:
+          type: boolean
+        fixture:
+          type: boolean
+        manifest:
+          type: object
+        engine_status:
+          type: string
+          enum:
+          - loading
+          - ready
+          - failed
+        requests:
+          type: array
+          items:
+            type: object
+        cache:
+          type: object
+        batches:
+          type: array
+          items:
+            type: object
+        metrics:
+          type: object
+      required:
+      - schema_version
+      - run_id
+      - high_watermark_seq
+      - trace_complete
+      - fixture
+      - manifest
+      - engine_status
+      - requests
+      - cache
+      - batches
+      - metrics
+      additionalProperties: false
+    EngineEvent:
+      $ref: ./event_schema.json

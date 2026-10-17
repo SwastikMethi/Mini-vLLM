@@ -1,0 +1,36 @@
+/* Approved Mini-vLLM UI, version 1.2. Tokens only; not a running application. */
+:root {
+  color-scheme: dark;
+  --color-bg: #131416;
+  --color-surface: #1a1b1e;
+  --color-border: #303237;
+  --color-text: #e6e8eb;
+  --color-text-muted: #a3a7af;
+  --color-accent: #ddb46e;
+  --color-accent-text: #e6c48a;
+  --color-selection-bg: #241f16;
+  --color-allocation: #858b95;
+  --color-error: #e28f8f;
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  --font-size-body: 14px;
+  --font-size-data: 13px;
+  --font-size-label: 12px;
+  --font-size-section: 18px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --radius-control: 3px;
+  --radius-panel: 0px;
+  --border-width: 1px;
+  --selected-edge-width: 2px;
+  --focus-ring: 2px solid var(--color-accent);
+  --focus-offset: 3px;
+  --motion-duration: 100ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-duration: 0ms; }
+}

@@ -1,0 +1,139 @@
+Mini vLLM UI Specification
+
+Version 1.2  |  17 October 2026  |  Approved amber design
+
+Implement the approved amber-on-graphite request explorer. Request streams, the paged KV map, and the batching timeline share backend events and selection. Sending a prompt reveals actual waiting, allocation, prefill, decode, and cleanup. The reference image sets visual direction; runtime contracts determine behavior.
+
+Workspace structure
+
+Region | Default content | Selection behavior
+Header and composer | Compact navigation, model identity, full-width prompt input and Send | Submit real work; settings remain secondary
+Request streams | Left pane: rows with prompt, output, state, cached count and page IDs | Selected row reveals lifecycle and highlights its blocks and lane
+KV cache | Right pane: physical blocks above the selected logical block table | Select a block or logical row to inspect mapping and committed slots
+Batching timeline | Full-width lower pane: engine and request lanes on one time axis | Select a batch or historical cursor across all views
+Detail drawer | Output, raw events, timing, cancellation and slot details on demand | Keep the main streams and cache views visible where space permits
+
+Visual direction and responsiveness
+
+Use the approved amber-on-graphite theme. Flat surfaces, thin dividers, compact controls and a single selection accent define the screen. Request IDs identify ownership; selected pages use amber and other allocations use neutral gray. Phase labels and patterns carry meaning. Light mode is a later option, not an R0 requirement.
+
+At 1280 px and wider, place request streams on the left (about 54%) and KV cache on the right (46%), with the timeline below both. Use a full-width composer and no permanent sidebar. At 960 to 1279 px, rebalance the split and reduce grid columns. Below 960 px, stack or tab the views while retaining selection and time cursor. Scroll grids and timelines locally.
+
+Controls and defaults
+
+Send or Ctrl/Cmd+Enter submits actual work. Default max_new_tokens remains 128 with thinking disabled; 64 in the image is an example override. Use 16-token blocks by default; changing block size requires a new run. Pause view freezes presentation, not inference. Step advances recorded events while paused. Live, historical view and replay have distinct labels; recorded replay supports 0.25x to 4x playback.
+
+Request state machine
+
+Phase | What the user sees | Authoritative signal
+Accepted | Stable ID; tokenization status; actual prompt token count | request.accepted, tokenization.started, tokenized
+Waiting | Queue position and explicit reason: scheduler, capacity, or active limit | request.queued; updates retain first queue-entry time
+Prefill | Prompt input count, allocated blocks, active forward, first output after completion | request.prefill.started and completed; token.sampled
+Decode | Committed decode step; generated count; cached count; executing or between steps | request.decode.started and completed; token.sampled
+Finished | Completed, cancelled, or failed; stop reason; cleanup outcome | cache.released followed by request.terminal
+
+Prefill behavior
+
+The engine processes prompt positions together within each transformer layer, using a causal mask. Layers still execute in order. Prefill is typically compute intensive; show this as an educational tooltip, not a measured bottleneck badge. A prompt of P tokens needs ceil(P / block_size) private blocks in R0. Short prompts may need only one block; the UI must show the actual allocation size.
+
+Decode behavior
+
+A decode forward processes one input token per active request and commits one additional logical KV slot per request across all layers. It consumes the previously sampled token and produces the next sample. The latest output therefore remains uncached until its next forward. If generation ends, that final output may never need a KV slot. Decode is often memory-bandwidth limited, but this depends on batch size, context, device, and implementation.
+
+Waiting and termination
+
+Waiting is not always caused by insufficient physical memory. It can reflect reserved growth credits, an active-request limit, or the next scheduler boundary. Distinguish admission reservations from currently owned blocks. Keep Cancellation requested visible until safe cleanup completes. A one-token output limit can finish after prefill, with Decode marked skipped.
+
+Paged KV virtual memory map
+
+Present the OS paging analogy as two address spaces: a request has an ordered logical block table, and the KV pool has fixed physical block IDs. These are application-managed tensor blocks, not actual OS page-table entries. The view covers the KV cache portion of device memory.
+
+Linked map and lookup
+
+Logical block | Token positions | Physical block | Committed slots
+L0 | 0 to 15 | P3 | 16 of 16
+L1 | 16 to 31 | P1 | 1 of 16
+
+Illustrative request A has 17 cached input tokens and two scattered physical blocks. At token position 16, logical_block = 16 // 16 = 1 and offset = 16 % 16 = 0. Its table maps L1 to P1. The physical pool is displayed in physical-ID order; it is never rearranged to make a request look contiguous.
+
+Block and slot semantics
+
+Each physical block represents a group of token slots across every model layer. Selecting a slot shows logical position, physical ID, offset, and whether it is committed.
+
+Show free, owned but empty, and committed states with text labels as well as color. An allocated block may have zero valid slots before a forward commits.
+
+Fill valid slots on request.prefill.completed or request.decode.completed. Do not fill them on token.sampled. The default display shows committed whole-model state, not speculative per-layer writes.
+
+Allocate a new block only when the next processed input crosses a block boundary. Show the logical table append and the new physical owner together.
+
+On terminal cleanup, clear ownership and valid slots while preserving the history in replay. R1 shared-prefix blocks require reference counts and a separate shared state.
+
+Capacity and fragmentation
+
+Show owned blocks, free blocks, unused slots within owned blocks, and reserved capacity credits separately. Free blocks remain usable even when scattered. A partially filled final block still wastes slots; paging does not eliminate all internal fragmentation. A request can be waiting for growth credits even when a free physical block is visible. The entire pool allocation stays constant when request ownership is released.
+
+Continuous batching timeline
+
+Use a time axis with an engine lane and one lane per request. Draw host-observed batch intervals from batch.started through batch.completed or failed. Show queued spans, prefill spans, decode spans, and terminal markers separately. Preserve a common time scale so a long prefill pause remains visible.
+
+Order | Actual execution | What this explains
+b01 | Prefill A | A enters generation and produces its first sample
+b02 | Decode A | A continues; the scheduler will reconsider new work at the boundary
+b03 | Prefill B while A remains decoding | A is active but its forward is paused during B prefill
+b04 | Decode A and B in one batch | The newcomer joins before A finishes
+Later | A or B completes; C is admitted when credits permit | Membership changes and resources are reused
+
+Scheduler fidelity
+
+R0 uses one engine worker, one bounded prefill at a time, and batched decode. A new request enters at a safe step boundary, not halfway through a kernel. FIFO order still applies among waiting requests. Continuous batching means the scheduler can change membership between steps; it does not inherently imply concurrent prefill and decode execution or faster response for every request.
+
+While B prefills, keep A in the Decode lifecycle phase but show its execution lane idle. Label the interruption as another request prefill, with its batch ID. Do not call this memory preemption: A retains its cache. R1 recomputation preemption and R2 chunked or mixed prefill/decode have separate future semantics.
+
+Interaction and timing
+
+Hover or focus a batch for phase, members, input tokens, start/end times, host duration, and nullable measured GPU duration. Clicking also selects its KV input-position ranges.
+
+A shared batch appears once in the engine lane and aligned on each member lane; its duration is not added once per member to a GPU total.
+
+Selecting an older batch enters recorded replay at that event range. A persistent historical cursor applies to all three views; Return to live restores the current state.
+
+Use a narrow marker and tooltip for very short intervals. Provide a table alternative and zoom; never inflate interval width without an explicit compressed-axis label.
+
+Approved interface reference
+
+The approved image below defines the composition, amber palette and restrained control styling. Its values and timeline are illustrative, not a coherent runtime fixture or benchmark. Do not hard-code its IDs, counters, pool size or state labels. Read 05_UI_Design_Guide.md and assets/theme.css for implementation details.
+
+[Approved UI reference: UI_Request_Workspace.png]
+
+Reference and runtime behavior
+
+Select a stream row to highlight its scattered blocks, lookup rows and timeline lane together. Display exact slot counts on inspection; the reference bars are compact occupancy summaries. The default timeline uses measured elapsed time with an engine lane. An optional scheduler-step view must be labelled ordinal. Derive every state from the shared cursor. The 69 ms contract fixture remains separate in contracts/legacy_contract_wireframe.png and does not define the final styling.
+
+Color and accessibility
+
+Canvas #131416; surface #1A1B1E; border #303237; text #E6E8EB; secondary #A3A7AF; amber #DDB46E; accent text #E6C48A; selected fill #241F16. Use 1 px dividers, 0 to 3 px corner radii, readable type and no glow. Preserve keyboard focus, text equivalents for ownership, readable contrast and reduced motion. Appearance tokens are centralized in assets/theme.css.
+
+Telemetry replay and acceptance
+
+Concern | Required behavior
+Single state source | Use one ordered reducer for lifecycle, block ownership, and batch history. Shared selection keys are run_id, request_id, batch_id, physical_block, and seq.
+Queue updates | Repeated request.queued updates reason and position only. Preserve the original queued timestamp for latency.
+Snapshot restore | Restore request counters and wait reasons, physical mappings, and batch start/end intervals plus members and positions. Details are in ui_projection_contract.md.
+Reconnect | Mark stale; apply the atomic snapshot and resume after its watermark. Ignore duplicates and resynchronize on a sequence gap.
+Replay | Use the same reducer and original timestamps. Seeking rebuilds a coherent state for all views. Playback speed does not change recorded metrics.
+Unmeasured data | Show GPU duration or bottleneck as unavailable unless measured. Missing historical intervals remain unavailable, not estimated.
+Completion and failure | Retain partial output and final text, stop reason, released ownership, and inspectable error details.
+
+Release acceptance scenarios
+
+At a block boundary, one decode commit fills exactly one input slot and the logical table grows only when required. token.sampled does not add a slot.
+
+B prefills before A finishes; A shows a real pause; a later batch lists both. The engine lane contains no invented overlap.
+
+C remains queued with an accurate reason while credits are exhausted, then enters after cleanup. Queue-position updates do not restart its waiting time.
+
+Selecting A highlights its logical table, physical blocks, and timeline lane; selecting b04 highlights A and B and their input positions.
+
+Replay and reconnect reproduce output, all three projections, and the terminal snapshot. Cancel during a forward produces pending cancellation then cleanup.
+
+Technical basis: TRD references S1 for paging, S9 for prefill/decode scheduling tradeoffs, and S10 for iteration-level scheduling. Defaults and visual acceptance checks are project requirements, not performance guarantees.

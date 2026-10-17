@@ -1,0 +1,31 @@
+[project]
+name = "mini-vllm"
+version = "0.1.0"
+description = "Paged KV cache + continuous batching learning server for Qwen3-0.6B"
+authors = [
+    { name = "Swastik Methi", email = "swastik.methi-ns@scopely.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.143.3",
+    "jsonschema>=4.26.0",
+    "pydantic>=2.14.1",
+    "safetensors>=0.8.0",
+    "torch==2.14.1",
+    "transformers==5.20.1",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["model: loads Qwen3-0.6B weights (slow)"]

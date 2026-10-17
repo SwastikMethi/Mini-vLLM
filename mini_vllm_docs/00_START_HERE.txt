@@ -1,0 +1,34 @@
+Mini-vLLM implementation package
+Package version 1.2 - 17 October 2026
+
+Read in this order:
+1. 01_PRD.md (also available as .docx) - goals, scope, user journeys, and release gates.
+2. 02_TRD.md (also available as .docx) - Python architecture, cache and scheduler invariants,
+   event transport, API contracts, model integration, and validation.
+3. 03_UI_Specification.md (also available as .docx) - actual request flow, memory and batch views,
+   replay behavior, visual direction, and accessibility.
+4. 04_Implementation_Plan.md (also available as .docx) - staged tasks, dependencies, estimates,
+   two-day core target, and the release test matrix.
+
+Each document is available as .md, .docx, and an exact .txt text equivalent.
+Start with README.md for clickable links.
+
+Version 1.2 adopts the approved amber-on-graphite UI.
+Read 05_UI_Design_Guide.md and assets/theme.css after the UI specification.
+The UI specification is version 1.2; PRD, TRD and implementation plan remain 1.1.
+contracts/ui_projection_contract.md defines the event-to-view behavior.
+contracts/continuous_batching_example.jsonl is a 76-event illustrative trace.
+Its checkpoint and terminal snapshots are included in contracts/.
+
+Supporting files:
+UI_Request_Workspace.png is the approved amber UI reference, with illustrative data.
+contracts/legacy_contract_wireframe.png is only a diagram of the older fixture,
+not the final visual design.
+contracts/event_schema.json is the event payload contract.
+contracts/event_examples.jsonl is an illustrative ordered request trace.
+contracts/snapshot_example.json is its expected terminal snapshot.
+contracts/api_contract.yaml describes the proposed HTTP interface.
+
+The two-day core milestone is intentionally narrower than the complete release.
+The documents are a plan and specification; the inference server is not built
+by this package. Fixtures demonstrate contracts and are not benchmark results.

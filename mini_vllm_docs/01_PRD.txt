@@ -1,0 +1,94 @@
+Mini vLLM Product Requirements
+
+Version 1.1  |  17 October 2026
+
+Build a local learning server that generates real text with Qwen3-0.6B and makes each request observable. The product combines paged KV storage, continuous batching, and a UI that explains the work the engine actually performed. The first release prioritizes correct generation and trace fidelity; performance improvements must be measured.
+
+Product goal
+
+A developer should be able to submit a prompt, see why it is waiting, follow its prefill and decode work, inspect its physical KV blocks, and understand which other requests shared a batch. The same recorded events should support a slower replay after the request finishes.
+
+Audience and intended use
+
+The primary user is a Python developer studying LLM inference systems. Initial operation is local and single user, with multiple concurrent requests representing workload concurrency. No login or external hosted-model API is required. The server runs downloaded model weights on one device.
+
+Release boundaries
+
+Release | Included | Completion bar
+R0 core | Real generation; paged storage with gathered attention; batched decode; live trace; cancel; replay | Correctness and event-driven UI work end to end
+R1 extensions | Exact-prefix reuse; reference counting; recomputation preemption; load experiments | Each behavior has visible events and invariant tests
+R2 optimization | Direct paged attention kernel; chunked prefill; profiling | Improvement demonstrated on a documented workload
+
+
+Scope decisions
+
+Use Python, PyTorch, Transformers, FastAPI, and a React TypeScript UI. React renders events; scheduling decisions stay in Python.
+
+Expose a single model and a single engine worker. Use short complete prefills between batched decode steps in R0.
+
+Exclude multi-GPU serving, training, quantization, speculative decoding, remote deployment, and multi-tenant access from R0.
+
+Treat two days as a time-boxed core milestone after device setup. The complete polished release is estimated at five to seven focused developer days.
+
+
+User journeys and requirements
+
+The request journey
+
+The user enters a prompt and sends it. The request appears immediately with a stable ID. The selected detail view shows acceptance, tokenization, queueing, prefill, repeated decode steps, and termination. When another request arrives, the user can see it enter a later batch while earlier requests continue. Waiting and terminal outcomes are explicit.
+
+ID | Requirement | Observable acceptance
+FR01 | Submit and inspect requests | Prompt, sampling settings, model revision, and request ID are available.
+FR02 | Trace actual processing | A stage changes only when its matching backend event arrives.
+FR03 | Inspect paged memory | Logical blocks, physical IDs, valid slots, and owner match the allocator and cross-highlight the selected request.
+FR04 | See continuous batching | A time-scaled timeline shows actual batch members, prefill interruptions, and a new request joining later decode steps.
+FR05 | Stream output | Each sampled token has one output index; reconnect adds no duplicates.
+FR06 | Cancel safely | UI shows cancellation requested until the engine acknowledges cleanup.
+FR07 | Replay recorded work | Pause and speed controls affect playback only; timestamps remain original.
+FR08 | Compare measured behavior | Baseline and paged runs expose identical workload and trace settings.
+
+
+Truthfulness of the visualization
+
+The UI must distinguish live execution, recorded replay, and design examples. It must never advance a request on a timer, invent a cache hit, label host submission time as GPU execution, or infer batch membership from concurrent network responses. Fast stages may complete before the next paint; replay makes them inspectable.
+
+Useful default view
+
+Show the composer and compact request list beside three linked views: request lifecycle, logical-to-physical KV map, and continuous batching timeline. Selecting a request, block, or batch cross-highlights related work. Keep raw events, detailed metrics, and expanded output in a drawer. Show queue reasons, committed slot counts, and real execution intervals without inferring GPU overlap.
+
+
+Success criteria and release checks
+
+Correctness and usability gates
+
+Area | Gate
+Model output | Single and batched paged paths agree with the reference within documented dtype tolerances. Any greedy-token divergence is investigated.
+Memory lifecycle | Every allocated block has one R0 owner. Terminal cleanup restores ownership and reservation accounting, including cancellation and errors.
+Trace fidelity | Recorded events reproduce the terminal snapshot, output indices, and block ownership. A missing stream segment triggers resynchronization.
+Concurrency | A new request is prefilling before an older request finishes; both later share a decode batch. Serial engine calls never appear to overlap.
+UI responsiveness | Proposed target: p95 event-to-render delay below 250 ms on localhost with eight active requests. Measure and report hardware.
+Accessibility | Keyboard submission, visible focus, labelled statuses, readable contrast, reduced motion, and text equivalents for memory colors.
+
+
+Metrics and honest performance claims
+
+Report server time to first token, client time to first visible text, inter-token latency, p50/p95/p99 end-to-end latency, output tokens per second, completion rate, and KV occupancy. Include unsuccessful requests and queue limits. Do not set a universal speedup goal before benchmarking: the PyTorch gather path adds copies and temporary memory.
+
+Release demonstration
+
+Submit a long prompt and inspect its prefill allocation; observe the first sampled token before any decode iteration.
+
+Submit additional requests while decoding is active. Inspect one actual shared decode batch and a request waiting for capacity.
+
+Cancel one request. Confirm its blocks are released only after the in-flight step is safe to clean up.
+
+Disconnect the event stream and reconnect. Verify the output and timeline reconcile without duplicate tokens.
+
+Replay a completed request at reduced speed. Confirm the final state equals the live final state.
+
+Export a trace and a benchmark manifest that identify device, versions, workload, and measurement mode.
+
+Risks and controls
+
+Model integration and variable-length attention are the principal engineering risks. Establish a logit reference before adding the UI. Conservative admission reservations prevent mid-decode memory exhaustion in R0. Hardware remains a setup decision: CUDA is the performance target; CPU or MPS require a compatibility check and separate benchmark labels.
+

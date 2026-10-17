@@ -1,0 +1,251 @@
+Mini vLLM Technical Requirements
+
+Version 1.1  |  17 October 2026
+
+Implement a single-device inference engine whose model execution, cache allocator, scheduler, and trace recorder share explicit contracts. R0 uses real paged KV storage with a PyTorch gather-based attention path. The UI consumes the engine event journal; it does not control the timing of inference.
+
+Runtime architecture
+
+Run one FastAPI process with one dedicated engine thread that exclusively owns model execution and cache mutations. API handlers enqueue commands and await acknowledgements without executing GPU work in the asyncio event loop. A thread-safe outbound queue transfers committed event groups to the event broker. Start Uvicorn with one worker; multiple workers would create competing engines and duplicate model memory.
+
+Module | Responsibility
+request.py | Request state, prompt tokens, sampled tokens, processed length, deadline, stop reason, and block table
+kv_cache.py | Fixed pool, free list, block ownership, admission credits, writes, reads, and release
+attention.py and runner.py | Qwen-compatible forward pass; prefill; batched single-token decode; sampling
+scheduler.py and engine.py | Plan a step, reserve capacity, execute, commit counts, handle cancellation, and emit events
+events.py and journal.py | Versioned envelopes, ordered journal, snapshots, stream replay, and export
+server.py and frontend | Commands and SSE transport; deterministic event reducer and request views
+benchmark.py and tests | Reference comparisons, adversarial lifecycles, workloads, and metric calculations
+
+
+Dependencies and startup
+
+Target Python 3.11, PyTorch, Transformers, safetensors, FastAPI, Uvicorn, Pydantic, pytest, and httpx. Use React, TypeScript, Vite, and CSS variables for the frontend. Select compatible releases in the first setup task, then commit exact lockfiles and the model revision. Do not use an unpinned main branch for an integration that depends on Qwen layer internals.
+
+Load model and tokenizer once; apply the Qwen chat template with thinking disabled for bounded demonstrations. Call eval and inference_mode. Profile available memory, allocate the KV pool, warm up a tiny forward pass, and emit engine.ready. Keep memory for weights, activations, gathered K/V, padding, attention workspace, and the allocator outside the KV pool budget. A capability failure is visible before Send becomes available.
+
+
+Request state and scheduling
+
+State machine
+
+Use accepted, tokenizing, queued, prefill, decoding, completed, cancelled, and failed. request.tokenization.started enters tokenizing; request.tokenized records its completion. admitted is an event between queued and prefill. Cancellation is pending until a safe step boundary. R1 adds preempted; a resumed request rebuilds K/V and returns to decoding without duplicating output.
+
+R0 admission policy
+
+Use FIFO admission and a configured maximum of eight active requests. Validate total prompt tokens plus max_new_tokens against a 2048-token request limit and the total pool capacity. Before admission, reserve capacity credits equal to ceil((prompt_tokens + max_new_tokens) / block_size). The sum of live reservations must never exceed the number of pool blocks. These credits guarantee future growth; physical block IDs are allocated only when tokens are about to be processed.
+
+This conservative reservation prevents deadlock when all active sequences grow at once. It may admit fewer requests than an overcommitting scheduler. Display reserved capacity separately from allocated physical blocks. Requests that can never fit are rejected; requests that can fit later remain queued with a reason. Cap the waiting queue at 64 and return 429 when full.
+
+One engine iteration
+
+Apply queued commands. A terminal request cannot become runnable again. Process cancellation before admitting further work.
+
+If capacity permits, admit at most one waiting request and run its complete bounded prefill. Emit the first sampled output token from that prefill.
+
+Build one decode batch from active nonterminal requests. Input shape is batch_size by one; use each request's previous sampled token and its own absolute position.
+
+Ensure writable blocks exist, execute all layers, and commit processed lengths only after successful execution. Sample one next token per decode row.
+
+Stream token events in stable request order, evaluate stopping conditions, release terminal resources, and publish one consistent state snapshot boundary.
+
+Repeat. Wait on the command queue when idle. The UI and SSE subscribers must not busy-loop or block the engine.
+
+Termination and failures
+
+End-of-sequence and output limit are R0 stop conditions. Limit-one generation can finish directly after prefill. Cancellation acknowledgement follows cleanup; an already executing step may finish first. An unexpected device OOM stops admissions and fails affected active requests with explicit cleanup; it is not a normal scheduling signal. A worker crash leaves a failed run whose last committed snapshot remains inspectable.
+
+
+Paged storage and memory accounting
+
+Tensor layout
+
+Allocate K and V separately with shape [layers, physical_blocks, block_size, kv_heads, head_dim]. A physical block ID denotes the same token-slot group across all layers. Read dimensions from the model configuration. Qwen3-0.6B specifies 28 layers, 8 KV heads, head_dim 128, and 16 query heads [S3].
+
+Quantity | R0 starting value or definition
+Block size | 16 tokens by default; optional 4-token teaching run; fixed for the run
+Pool blocks | 256 as an example; derive the final count from the actual device budget
+K plus V per token | 2 x 28 x 8 x 128 x 2 bytes = 114688 bytes, or 112 KiB, for 16-bit storage
+One full block | 16 x 112 KiB = 1.75 MiB across all layers
+Example pool | 256 blocks = 448 MiB; excludes every non-KV allocation
+Address mapping | physical_id = block_table[position // block_size]; offset = position % block_size
+
+
+Lifecycle invariants
+
+An R0 physical block is either free or owned by exactly one request. Allocate atomically after checking the full number of additional blocks required.
+
+Write K after Q/K normalization and rotary transformation; write V from its projection. Ignore padding tokens for allocation, counters, and writes.
+
+processed_tokens records inputs processed through every layer; cached_tokens counts currently retained K/V. After release, cached_tokens is zero and processed_tokens remains historical. A just-sampled token is cached only on its next forward pass.
+
+Advance processed_tokens once after a successful whole-model forward. Never advance it once per layer.
+
+On completion, cancellation, or failure, release physical ownership and capacity credits exactly once. Reused blocks are safe only when reads are limited to newly valid slots.
+
+Metrics exposed to the UI
+
+Keep four different measurements: allocated pool bytes, blocks owned by active requests, unused slots inside owned blocks, and reserved capacity credits. R0 internal slot waste is (owned_blocks x block_size - valid_cached_tokens) / (owned_blocks x block_size), with zero when no blocks are owned. Pool allocation remains constant even when a request releases ownership. Framework allocated or reserved GPU bytes are separate device metrics.
+
+R1 prefix sharing changes the accounting: count physical shared blocks once, retain owner/reference sets, and keep retained-prefix blocks separate from free and active-private blocks. Rework admission credits before enabling shared-cache admission.
+
+
+Model runner and attention integration
+
+Reference path first
+
+Load the official Qwen3-0.6B model and tokenizer. Reuse its weights and modules in a controlled forward runner; preserve Q/K normalization, rotary position handling, grouped-query attention, residuals, RMSNorm, MLP, final normalization, and language-model head [S4]. A standard generate call can serve as a reference, but the engine owns the new token loop.
+
+Prefill
+
+For R0, run one new prompt at a time. All prompt positions are real tokens. Allocate its blocks, compute per-layer Q/K/V, write cache slots, and apply a causal mask so each query sees only its past and itself. The final prompt position yields the first output token. Record prompt processing and sampling as different events.
+
+Batched decode
+
+Pack one previous output token per active request. Vectorize embeddings, projections, MLPs, and output computation over the batch. For each layer, gather the cached history for each request, append its new K/V, and pad gathered histories to the batch maximum length. Zero padded entries and exclude them with a boolean validity mask. Never read uninitialized slots. Preserve per-row logical positions even when the batch membership changes.
+
+PyTorch scaled_dot_product_attention accepts explicit masks; True means a position participates. For single-token decode with a non-square query/key matrix, generic is_causal=True has upper-left alignment and is not the intended history mask. Use a length-aware explicit mask and is_causal=False. Repeat KV heads to query-head count in the portable reference path; evaluate enable_gqa only on a tested supported backend [S5].
+
+Integration boundaries
+
+Contract | Meaning
+plan_step | Returns immutable request IDs, phase, logical positions, expected writes, and reservation changes.
+runner.forward | Returns logits and execution metadata. It never chooses admission or releases requests.
+commit_step | Advances counters, samples outputs, assigns event sequence numbers, and publishes a consistent state.
+abort_step | Marks affected work failed and releases owned resources; no successful completion event is emitted.
+
+
+Optimization boundary
+
+The R0 gather path is real paged storage but performs additional copies and padded attention. It can use more temporary memory or run slower than optimized inference libraries. R2 replaces this read path with a tested Triton or equivalent paged-attention kernel. Keep the allocator and event contracts stable across backends. No claim of vLLM-level speed is part of R0.
+
+
+Events snapshots and reliable streaming
+
+Authoritative event journal
+
+Every committed engine mutation produces an event with schema_version, run_id, seq, type, monotonic_ns, wall_time, source, request_id, batch_id, and payload. seq is strictly increasing within a run. Request and batch IDs remain stable; per-request decode_step and token_index counters are separate. The accompanying event_schema.json defines typed payloads and event_examples.jsonl demonstrates the order.
+
+Use SQLite WAL for the local event journal and snapshots. The engine is the sole writer. Commit and publish request and batch start events before invoking the forward call; commit completion events and their snapshot after materialized results. This exposes ongoing work rather than a retrospective animation. Timestamps are host-observed boundaries, not device instructions. Store GPU elapsed time only when measured with device events [S8].
+
+SSE contract
+
+POST a request, receive 202 and its ID, then consume one global run stream. GET /api/runs/{run_id}/events returns text/event-stream records with id run_id:seq and event engine_event. Browser reconnection uses Last-Event-ID; an after_seq query parameter initializes the cursor after a snapshot or new page load. Heartbeats have no sequence number [S6, S7].
+
+GET /api/runs/{run_id}/snapshot returns state through high_watermark_seq atomically. Apply that snapshot, then request events after the watermark. The reducer ignores duplicate seq values, preserves token indices, and detects gaps. Because the stream is global, filtering by request happens in the client after ordering. A reset control event instructs the client to fetch a new snapshot when its cursor is stale or invalid.
+
+Backpressure and retention
+
+A slow browser receives a reconnect instruction or is disconnected once its bounded subscriber queue fills. It resumes from the journal. The engine never waits for a slow browser. A journal write failure stops admission and fails the run visibly after safe cleanup; the UI labels the trace incomplete. Never silently drop a token, allocation, release, or terminal event.
+
+Retain up to 20 completed runs or 200 MiB, whichever limit is hit first; evict oldest completed runs only. Bound individual event payloads and active request lengths. If active data exhausts the budget, stop accepting work and expose a storage-limit reason. Restart creates a new run_id; old retained runs are available for replay but cannot resume inference.
+
+UI synchronization
+
+Apply events immediately to a normalized store; batch visual updates to animation frames or at most 30 Hz. No state transition is inferred from a cosmetic animation. Disconnection marks the displayed state stale. Replay uses the same reducer with recorded timestamps and separate playback time.
+
+
+API timing and extensions
+
+Endpoint | Contract
+GET /api/health | Loading, ready, or failed; device and version manifest; active run ID
+GET /api/runs | Retained run IDs, status, start time, and trace completeness
+POST /api/requests | Prompt, max_new_tokens, temperature, seed, and client_request_id; 202 on acceptance
+POST /api/requests/{id}/cancel | 202 pending or 200 already terminal; idempotent
+GET /api/runs/{id}/snapshot | Consistent request, batch, cache, and metric state plus high watermark
+GET /api/runs/{id}/events | Resumable global SSE event stream
+GET /api/runs/{id}/export | JSON manifest, initial state, ordered events, and final snapshot
+
+
+The client_request_id is an idempotency key scoped to a run: identical retried bodies return the same request; a changed body returns 409. Use 422 for invalid fields or impossible token budgets, 429 for queue saturation, and 503 for a loading or failed engine. HTTP disconnect does not implicitly cancel work. Use bounded per-request deadlines so abandoned work terminates.
+
+Timing definitions
+
+Server TTFT is accepted-to-first-token-sampled using one monotonic clock. Queue time is queued-to-first-prefill-started. Host forward duration is batch-started-to-batch-completed; attribute it to the shared batch rather than summing it across member requests. GPU duration is a distinct nullable measurement. Client first-visible-text includes network, token-to-text buffering, and render delay. Never subtract a browser clock from a server clock.
+
+End-to-end latency is accepted-to-terminal. Inter-token latency uses adjacent sampled-token timestamps. Throughput is sampled output tokens divided by the documented cohort interval. Token events carry display-text deltas; an incomplete character may produce an empty delta. Terminal events include final_output_text to reconcile buffered text on every outcome. Measure before serialization and browser rendering.
+
+R1 extensions
+
+Prefix caching uses exact token-prefix keys that include model revision, adapter identity, and relevant position configuration. Reuse only complete immutable blocks in the first implementation; retain references and use copy-on-write before any shared modification. A full-prefix hit still needs next-token logits: recompute the final needed suffix, or retain validated final-position logits. Do not pretend a cache hit eliminates all execution [S2].
+
+Preemption pauses a selected request at a safe step boundary, retains token history and RNG state, releases private cache ownership, and requeues it. On resume, recompute the cached history and continue from the last unprocessed sampled token. Already streamed output indices remain unchanged. Add preempted, resumed, and recompute events. Limit repeated preemption and use aging to prevent starvation [S9].
+
+
+Validation and technical references
+
+Required engineering checks
+
+Compare reference and paged logits on short prompts, lengths 15/16/17/31/32/33, multi-block prompts, and several decode steps. Record dtype-specific tolerances and investigate greedy-token divergence.
+
+Compare batched requests with independent reference runs at different prompt lengths. Check padding, absolute positions, GQA, and dynamic batch removal.
+
+Test admission credits, all-or-nothing allocation, block reuse, full-capacity waiting, failed execution, repeated cancellation, and terminal cleanup.
+
+Replay the event fixture and recorded integration traces. Check duplicate delivery, gaps, stale cursors, disconnect during prefill, terminal-after-reconnect, and identical final snapshots.
+
+Use a controlled concurrency test to prove multiple active sequences share a decode call and a later request is admitted before all earlier requests finish.
+
+Benchmark controls
+
+Keep device, dtype, revision, tokenization, prompts, output caps, stop policy, sampling, arrival schedule, and instrumentation mode identical. Compare one-at-a-time reference generation, static batching where feasible, and the continuous paged path. Warm up first, exclude model loading, run repeated trials, and retain failures and timeouts. Use at least 1000 completed requests per condition for a reported p99 and label smaller samples exploratory. Measure UI-trace overhead separately; do not compare tracing-on with tracing-off as an engine speedup.
+
+Primary references
+
+S1  PagedAttention paper
+https://arxiv.org/abs/2309.06180
+
+S2  vLLM automatic prefix caching
+https://docs.vllm.ai/en/stable/features/automatic_prefix_caching/
+
+S3  Qwen3 configuration
+https://huggingface.co/Qwen/Qwen3-0.6B/raw/main/config.json
+
+S4  Qwen3 model implementation
+https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3/modeling_qwen3.py
+
+S5  PyTorch scaled dot product attention
+https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention
+
+S6  FastAPI streaming responses
+https://fastapi.tiangolo.com/advanced/custom-response/
+
+S7  MDN server sent events
+https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+
+S8  PyTorch CUDA Event
+https://docs.pytorch.org/docs/stable/generated/torch.cuda.Event.html
+
+S9  vLLM preemption and scheduling
+https://docs.vllm.ai/en/stable/configuration/optimization/
+
+S10  Orca iteration level scheduling
+https://www.usenix.org/conference/osdi22/presentation/yu
+
+References checked 17 October 2026. Proposed limits and acceptance targets in this package are project decisions, not published performance guarantees.
+
+
+Runtime view projections
+
+Expose three synchronized projections of the same ordered engine state: request lifecycle, KV logical-to-physical mapping, and continuous batch history. contracts/ui_projection_contract.md specifies fields, derivations, snapshot recovery, and cross-selection. The event envelope remains schema version 1; this documentation revision is version 1.1.
+
+Queue and request state
+
+Emit request.queued again only when its reason or position changes while the request remains queued. Preserve its first queue-entry timestamp; a queue update is not a second admission. Maintain one lifecycle phase and a separate executing_batch_id. A request can remain decoding while another request prefills; its own execution indicator must then be idle.
+
+Committed memory state
+
+The pool is allocated at startup. cache.allocated grants physical block ownership, not a new device allocation. A prefill grants ceil(prompt_tokens / block_size) blocks in R0. Mark slots valid only when the whole forward commits. Decode writes the previously sampled token; token.sampled alone does not increment cached_tokens. Calculate each block valid length from committed cached_tokens and its logical index, bounded by block_size.
+
+Timeline and restoration
+
+Persist batch members with start_position and input_tokens, started_ns, completed_ns, and event ranges. Completed durations alone cannot restore a timeline. Include this history, request queue timestamps, current wait reasons, block tables, and counters in snapshots. A missing historical interval is labelled unavailable; it is never drawn from an assumed duration. Active intervals end visually at the observation cursor and remain marked ongoing.
+
+Execution model and teaching labels
+
+R0 admits FIFO at safe model-step boundaries, prefills one bounded prompt, then runs a decode batch. New work joins before older requests finish; it does not jump ahead of older waiting requests or interrupt an executing kernel. No simultaneous prefill/decode execution is promised [S10]. Chunked mixed prefill/decode is R2 [S9]. Prefill is typically compute intensive and decode often memory-bandwidth limited, but measured bottlenecks depend on workload and hardware.
+
+Paging and fragmentation
+
+The map covers the KV pool, not all GPU memory or OS page tables. Fixed interchangeable blocks avoid the contiguous-allocation requirement. Internal unused slots remain in a partially filled final block; reserved admission credits are a separate constraint. Do not label free physical blocks as fragmentation or claim zero waste [S1]. Test 4-token runs at positions 3/4/5 as well as the existing 16-token boundary cases.
+

@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "run_id": "example-run-001",
+  "high_watermark_seq": 28,
+  "trace_complete": true,
+  "fixture": true,
+  "engine_status": "ready",
+  "manifest": {
+    "model_id": "Qwen/Qwen3-0.6B",
+    "model_revision": "example-revision-not-a-measurement",
+    "device": "example-device",
+    "dtype": "float16",
+    "block_size": 16,
+    "pool_blocks": 8,
+    "trace_mode": "illustrative-fixture"
+  },
+  "requests": [
+    {
+      "request_id": "example-request-A",
+      "status": "completed",
+      "stop_reason": "length",
+      "prompt_tokens": 15,
+      "generated_tokens": 3,
+      "processed_tokens": 17,
+      "cached_tokens": 0,
+      "token_ids": [
+        100,
+        101,
+        102
+      ],
+      "output_text": "Example output.",
+      "block_table": [],
+      "reservation_blocks": 0,
+      "decode_step": 2,
+      "cancel_requested": false,
+      "accepted_ns": 10000000,
+      "queued_ns": 12000000,
+      "admitted_ns": 20000000,
+      "terminal_ns": 88000000,
+      "wait_reason": null,
+      "queue_position": null,
+      "executing_batch_id": null,
+      "sampled_ns": [
+        61000000,
+        73000000,
+        86000000
+      ],
+      "max_new_tokens": 3
+    }
+  ],
+  "cache": {
+    "block_size": 16,
+    "pool_blocks": 8,
+    "free_blocks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "owners": {},
+    "reserved_capacity_blocks": 0
+  },
+  "batches": [
+    {
+      "batch_id": "example-batch-1",
+      "phase": "prefill",
+      "request_ids": [
+        "example-request-A"
+      ],
+      "status": "completed",
+      "host_duration_ms": 37.0,
+      "gpu_duration_ms": null,
+      "members": [
+        {
+          "request_id": "example-request-A",
+          "input_tokens": 15,
+          "start_position": 0
+        }
+      ],
+      "scheduled_ns": 22000000,
+      "started_ns": 23000000,
+      "completed_ns": 60000000,
+      "start_seq": 10,
+      "end_seq": 11
+    },
+    {
+      "batch_id": "example-batch-2",
+      "phase": "decode",
+      "request_ids": [
+        "example-request-A"
+      ],
+      "status": "completed",
+      "host_duration_ms": 9.0,
+      "gpu_duration_ms": null,
+      "members": [
+        {
+          "request_id": "example-request-A",
+          "input_tokens": 1,
+          "start_position": 15
+        }
+      ],
+      "scheduled_ns": 62000000,
+      "started_ns": 63000000,
+      "completed_ns": 72000000,
+      "start_seq": 16,
+      "end_seq": 17
+    },
+    {
+      "batch_id": "example-batch-3",
+      "phase": "decode",
+      "request_ids": [
+        "example-request-A"
+      ],
+      "status": "completed",
+      "host_duration_ms": 9.0,
+      "gpu_duration_ms": null,
+      "members": [
+        {
+          "request_id": "example-request-A",
+          "input_tokens": 1,
+          "start_position": 16
+        }
+      ],
+      "scheduled_ns": 75000000,
+      "started_ns": 76000000,
+      "completed_ns": 85000000,
+      "start_seq": 23,
+      "end_seq": 24
+    }
+  ],
+  "metrics": {
+    "server_ttft_ms": 51.0,
+    "end_to_end_ms": 78.0,
+    "queue_ms": 11.0,
+    "inter_token_ms": [
+      12.0,
+      13.0
+    ]
+  }
+}
